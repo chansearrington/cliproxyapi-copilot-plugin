@@ -23,7 +23,7 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-  package:
+  package-linux-amd64:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -32,11 +32,48 @@ jobs:
       - name: Build and package production plugin
         run: make package VERSION=0.0.0
 
+      - name: Load-test the packaged library
+        run: python3 scripts/smoke-load.py dist/cliproxyapi-copilot_0.0.0_linux_amd64.zip cliproxyapi-copilot.so
+
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: cliproxyapi-copilot-linux-amd64
           path: |
             dist/cliproxyapi-copilot_0.0.0_linux_amd64.zip
+            dist/checksums.txt
+          if-no-files-found: error
+
+  package-darwin-arm64:
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Run tests on macOS
+        run: go test ./...
+
+      - name: Build and package production plugin
+        run: make package-darwin-arm64 VERSION=0.0.0
+
+      - name: Inspect and load-test the packaged library
+        run: |
+          file build/plugins/darwin/arm64/cliproxyapi-copilot.dylib
+          codesign --verify --verbose build/plugins/darwin/arm64/cliproxyapi-copilot.dylib
+          otool -L build/plugins/darwin/arm64/cliproxyapi-copilot.dylib
+          python3 scripts/smoke-load.py dist/cliproxyapi-copilot_0.0.0_darwin_arm64.zip cliproxyapi-copilot.dylib
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cliproxyapi-copilot-darwin-arm64
+          path: |
+            dist/cliproxyapi-copilot_0.0.0_darwin_arm64.zip
             dist/checksums.txt
           if-no-files-found: error

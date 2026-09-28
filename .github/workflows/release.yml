@@ -9,12 +9,11 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  validate:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
       - name: Validate release tag
         id: version
         shell: bash
@@ -26,6 +25,13 @@ jobs:
             exit 1
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  build-linux-amd64:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Run tests
         run: |
@@ -40,14 +46,78 @@ jobs:
             go test ./...
 
       - name: Build marketplace package
-        run: make package VERSION=${{ steps.version.outputs.value }}
+        run: make package VERSION=${{ needs.validate.outputs.version }}
+
+      - name: Load-test the packaged library
+        run: python3 scripts/smoke-load.py dist/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_linux_amd64.zip cliproxyapi-copilot.so
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-amd64
+          path: dist/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_linux_amd64.zip
+          if-no-files-found: error
+
+  build-darwin-arm64:
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build marketplace package
+        run: make package-darwin-arm64 VERSION=${{ needs.validate.outputs.version }}
+
+      - name: Inspect and load-test the packaged library
+        run: |
+          go version
+          file build/plugins/darwin/arm64/cliproxyapi-copilot.dylib
+          codesign --verify --verbose build/plugins/darwin/arm64/cliproxyapi-copilot.dylib
+          python3 scripts/smoke-load.py dist/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_darwin_arm64.zip cliproxyapi-copilot.dylib
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-darwin-arm64
+          path: dist/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_darwin_arm64.zip
+          if-no-files-found: error
+
+  release:
+    needs: [validate, build-linux-amd64, build-darwin-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/packages
+          merge-multiple: true
+
+      - name: Assemble checksums
+        run: |
+          cd dist/packages
+          sha256sum cliproxyapi-copilot_*.zip | sort -k2 > ../checksums.txt
+          cat ../checksums.txt
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/cliproxyapi-copilot_${{ steps.version.outputs.value }}_linux_amd64.zip \
+            dist/packages/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_linux_amd64.zip \
+            dist/packages/cliproxyapi-copilot_${{ needs.validate.outputs.version }}_darwin_arm64.zip \
             dist/checksums.txt \
             --verify-tag \
             --generate-notes \
