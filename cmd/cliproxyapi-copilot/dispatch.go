@@ -158,9 +158,16 @@ func dispatch(method string, request []byte) (any, error) {
 	}
 }
 
+// registrationSchemaVersion is the RPC schema this plugin declares at plugin.register.
+// Hosts reject plugins whose declared schema is newer than their own, and the
+// CLIProxyAPI Home control plane still embeds a host that speaks schema 1. The
+// plugin uses no method added after schema 1, so declaring 1 keeps it loadable by
+// both Home and current CPA nodes (which accept any schema up to their own).
+const registrationSchemaVersion uint32 = 1
+
 func pluginRegistration() registration {
 	return registration{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: registrationSchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "GitHub Copilot subscription provider",
 			Version:          pluginVersion,
