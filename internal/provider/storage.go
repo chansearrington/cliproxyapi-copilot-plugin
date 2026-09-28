@@ -50,6 +50,12 @@ func marshalStorage(storage authStorage) ([]byte, error) {
 	return json.Marshal(storage)
 }
 
+// credentialPrefix namespaces every model a Copilot credential serves as
+// "copilot/<model>". With the host's force-model-prefix setting enabled, the bare
+// upstream IDs are not registered at all, so Copilot models never share a pool
+// with native providers that expose the same model ID (for example claude-opus-5).
+const credentialPrefix = providerID
+
 func authData(storage authStorage, id, fileName, prefix, proxyURL string, disabled bool, metadata map[string]any, attributes map[string]string) (pluginapi.AuthData, error) {
 	raw, errMarshal := marshalStorage(storage)
 	if errMarshal != nil {
@@ -69,6 +75,9 @@ func authData(storage authStorage, id, fileName, prefix, proxyURL string, disabl
 	}
 	if len(attributes) == 0 {
 		attributes = map[string]string{"auth_kind": "oauth"}
+	}
+	if strings.TrimSpace(prefix) == "" {
+		prefix = credentialPrefix
 	}
 	nextRefresh := nextGitHubRefresh(storage, time.Now())
 	return pluginapi.AuthData{
