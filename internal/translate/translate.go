@@ -45,7 +45,34 @@ func RequestForEndpointFrom(source, model string, body []byte, stream bool, endp
 	if err != nil {
 		return nil, err
 	}
-	return setModelAndStream(out, model, stream)
+	out, err = setModelAndStream(out, model, stream)
+	if err != nil || endpoint != EndpointResponses {
+		return out, err
+	}
+	return clampResponsesOutputTokens(out)
+}
+
+// minResponsesOutputTokens is the smallest max_output_tokens Copilot's /responses endpoint
+// accepts; smaller values are rejected with HTTP 400 instead of being honoured.
+const minResponsesOutputTokens = 16
+
+// clampResponsesOutputTokens raises max_output_tokens to the Copilot minimum when a client
+// (or a translated Claude max_tokens) asks for fewer. Absent or larger values are unchanged.
+func clampResponsesOutputTokens(body []byte) ([]byte, error) {
+	var value map[string]any
+	if errUnmarshal := json.Unmarshal(body, &value); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode translated request: %w", errUnmarshal)
+	}
+	limit, ok := value["max_output_tokens"].(float64)
+	if !ok || limit >= minResponsesOutputTokens {
+		return body, nil
+	}
+	value["max_output_tokens"] = minResponsesOutputTokens
+	out, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("encode translated request: %w", errMarshal)
+	}
+	return out, nil
 }
 
 func ResponseToResponses(ctx context.Context, endpoint, model string, original, translated, body []byte) ([]byte, error) {
@@ -77,10 +104,21 @@ func StreamFromEndpoint(ctx context.Context, endpoint, destination, model string
 		return nil, err
 	}
 	to := sdktranslator.FromString(destination)
+	var out [][]byte
 	if from == to {
-		return [][]byte{append([]byte(nil), frame...)}, nil
+		out = [][]byte{append([]byte(nil), frame...)}
+	} else {
+		out, err = stream(ctx, from, to, model, original, translated, frame, state)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return stream(ctx, from, to, model, original, translated, frame, state)
+	if to == sdktranslator.FormatOpenAI {
+		// The host's chat-completions handler writes "data: <chunk>\n\n" around every chunk and
+		// sends its own [DONE], so chat output must be bare JSON payloads.
+		return chatStreamPayloads(out), nil
+	}
+	return out, nil
 }
 
 func ResponsesSSEToClaude(ctx context.Context, model string, original, translated, frame []byte, state *any) ([][]byte, error) {
@@ -93,6 +131,15 @@ func request(from, to sdktranslator.Format, model string, body []byte, stream bo
 	}
 	if from == sdktranslator.FormatClaude && to == sdktranslator.FormatOpenAIResponse {
 		return claudeRequestToResponses(model, body, stream)
+	}
+	if from == sdktranslator.FormatOpenAI && to == sdktranslator.FormatOpenAIResponse {
+		// No official OpenAI-chat -> Responses route exists; go through Claude, whose
+		// Responses bridge is this package's own.
+		claudeBody := registry.TranslateRequest(from, sdktranslator.FormatClaude, model, body, stream)
+		if len(claudeBody) == 0 || !json.Valid(claudeBody) {
+			return nil, fmt.Errorf("official request translation from %s to %s failed", from, sdktranslator.FormatClaude)
+		}
+		return claudeRequestToResponses(model, claudeBody, stream)
 	}
 	if from != to && !registry.HasRequestTransformer(from, to) {
 		intermediate, ok := intermediateFormat(from, to)
@@ -120,6 +167,11 @@ func response(ctx context.Context, from, to sdktranslator.Format, model string, 
 	if from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatClaude {
 		return responsesResponseToClaude(model, body)
 	}
+	if from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatOpenAI {
+		// The official Claude -> chat non-stream converter only reads Claude SSE "data:" lines
+		// and returns an empty completion for a Claude JSON body, so convert directly.
+		return responsesResponseToChat(model, body)
+	}
 	if from != to && !registry.HasNonStreamResponseTransformer(to, from) {
 		intermediate, ok := intermediateFormat(to, from)
 		if !ok {
@@ -143,6 +195,30 @@ func response(ctx context.Context, from, to sdktranslator.Format, model string, 
 func stream(ctx context.Context, from, to sdktranslator.Format, model string, original, translated, frame []byte, state *any) ([][]byte, error) {
 	if from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatClaude {
 		return responsesStreamToClaude(model, frame, state)
+	}
+	if from == sdktranslator.FormatOpenAIResponse && to == sdktranslator.FormatOpenAI {
+		if state == nil {
+			return nil, fmt.Errorf("stream translation via claude requires state")
+		}
+		hopState, okState := (*state).(*twoHopStreamState)
+		if !okState {
+			hopState = &twoHopStreamState{}
+			*state = hopState
+		}
+		claudeRequest := registry.TranslateRequest(to, sdktranslator.FormatClaude, model, original, true)
+		claudeFrames, errClaude := responsesStreamToClaude(model, frame, &hopState.First)
+		if errClaude != nil {
+			return nil, errClaude
+		}
+		var out [][]byte
+		for _, claudeFrame := range claudeFrames {
+			// The official Claude -> chat stream converter ignores any frame that does not
+			// start with "data:", so hand it only the data line of each Claude SSE event.
+			for _, dataLine := range sseDataLines(claudeFrame) {
+				out = append(out, registry.TranslateStream(ctx, sdktranslator.FormatClaude, to, model, original, claudeRequest, dataLine, &hopState.Second)...)
+			}
+		}
+		return out, nil
 	}
 	if from != to && !registry.HasStreamResponseTransformer(to, from) {
 		intermediate, ok := intermediateFormat(to, from)

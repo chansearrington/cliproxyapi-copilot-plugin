@@ -12,7 +12,7 @@ import (
 )
 
 var pluginService = provider.New(hostTransport{})
-var pluginVersion = "0.3.4"
+var pluginVersion = "0.3.5"
 
 type lifecycleRequest struct {
 	ConfigYAML []byte `json:"config_yaml"`
@@ -190,8 +190,8 @@ func pluginRegistration() registration {
 			AuthProvider:          true,
 			Executor:              true,
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
-			ExecutorInputFormats:  []string{"openai-response", "claude"},
-			ExecutorOutputFormats: []string{"openai-response", "claude"},
+			ExecutorInputFormats:  []string{"openai-response", "claude", "openai"},
+			ExecutorOutputFormats: []string{"openai-response", "claude", "openai"},
 		},
 	}
 }
