@@ -60,14 +60,22 @@ func claudeMessageToSSE(body []byte) ([]byte, error) {
 		block := objectValue(rawBlock)
 		kind := stringValue(block["type"])
 		opening := map[string]any{"type": kind}
-		var delta map[string]any
+		var deltas []map[string]any
 		switch kind {
 		case "text":
 			opening["text"] = ""
-			delta = map[string]any{"type": "text_delta", "text": rawStringValue(block["text"])}
+			// Claude streams a cited text block as an empty citations list on the block, then one
+			// citations_delta per citation ahead of the text it cites.
+			if citations := arrayValue(block["citations"]); len(citations) > 0 {
+				opening["citations"] = []any{}
+				for _, citation := range citations {
+					deltas = append(deltas, map[string]any{"type": "citations_delta", "citation": citation})
+				}
+			}
+			deltas = append(deltas, map[string]any{"type": "text_delta", "text": rawStringValue(block["text"])})
 		case "thinking":
 			opening["thinking"] = ""
-			delta = map[string]any{"type": "thinking_delta", "thinking": rawStringValue(block["thinking"])}
+			deltas = append(deltas, map[string]any{"type": "thinking_delta", "thinking": rawStringValue(block["thinking"])})
 		case "tool_use":
 			opening["id"] = block["id"]
 			opening["name"] = block["name"]
@@ -76,14 +84,14 @@ func claudeMessageToSSE(body []byte) ([]byte, error) {
 			if errArgs != nil {
 				return nil, fmt.Errorf("encode tool input: %w", errArgs)
 			}
-			delta = map[string]any{"type": "input_json_delta", "partial_json": string(arguments)}
+			deltas = append(deltas, map[string]any{"type": "input_json_delta", "partial_json": string(arguments)})
 		default:
 			for key, value := range block {
 				opening[key] = value
 			}
 		}
 		out.Write(claudeSSE("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": opening}))
-		if delta != nil {
+		for _, delta := range deltas {
 			out.Write(claudeSSE("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": delta}))
 		}
 		if kind == "thinking" && stringValue(block["signature"]) != "" {

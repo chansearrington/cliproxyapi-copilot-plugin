@@ -18,6 +18,12 @@ Patches carried on `fleet`, one commit each, offered upstream where general:
 3. Report GitHub's 402 (AI credits exhausted) to the host as 429 (quota cooldown).
 4. Prefer Copilot's `/v1/messages` endpoint for Claude models (keeps thinking and caching).
 5. `darwin/arm64` build, CI and release jobs, and a load test of every packaged library.
+6. Accept the OpenAI chat format natively, bridge chat to Copilot's Responses-only models, and
+   raise Responses `max_output_tokens` to Copilot's minimum of 16 (v0.3.5).
+7. Render Claude answers for every other client format, and normalise a Responses string
+   `input` (v0.3.6).
+8. Real token usage at the end of bridged streams, and Claude citations kept for Responses
+   clients (v0.3.7).
 
 Workstream record: `docs/fleet/ws-0002-copilot-provider.md` in the fleet fork of
 CLIProxyAPIHome.
