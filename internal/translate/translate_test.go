@@ -486,3 +486,111 @@ func TestClaudeSSEFramesTranslateToResponsesStream(t *testing.T) {
 		t.Fatalf("Responses stream lacks the text delta: %s", joined.String())
 	}
 }
+
+func TestResponsesSSEToOpenAIChatStreamCarriesTerminalUsage(t *testing.T) {
+	t.Parallel()
+
+	original := []byte(`{"model":"gpt-5.6-sol","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	translated, err := RequestForEndpointFrom("openai", "gpt-5.6-sol", original, true, EndpointResponses)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	frames := []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-sol\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\n",
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-sol\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12,\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n",
+	}
+	var state any
+	var last []byte
+	for _, frame := range frames {
+		out, errStream := StreamFromEndpoint(context.Background(), EndpointResponses, "openai", "gpt-5.6-sol", original, translated, []byte(frame), &state)
+		if errStream != nil {
+			t.Fatalf("StreamFromEndpoint() error = %v", errStream)
+		}
+		for _, chunk := range out {
+			if gjson.GetBytes(chunk, "usage").Exists() {
+				last = chunk
+			}
+		}
+	}
+	if last == nil {
+		t.Fatal("chat stream carried no usage chunk")
+	}
+	if gjson.GetBytes(last, "usage.prompt_tokens").Int() != 9 || gjson.GetBytes(last, "usage.completion_tokens").Int() != 3 ||
+		gjson.GetBytes(last, "usage.total_tokens").Int() != 12 || gjson.GetBytes(last, "usage.prompt_tokens_details.cached_tokens").Int() != 4 {
+		t.Fatalf("terminal chat usage does not match the Responses usage: %s", last)
+	}
+}
+
+func TestResponsesUsageMapsToClaudeCacheSemantics(t *testing.T) {
+	t.Parallel()
+
+	// Responses input_tokens include cached tokens; Claude input_tokens exclude cache reads.
+	body := []byte(`{"id":"resp_3","model":"gpt-5.6-sol","status":"completed","output":[{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":9,"output_tokens":3,"total_tokens":12,"input_tokens_details":{"cached_tokens":4}}}`)
+	got, err := ResponseFromEndpoint(context.Background(), EndpointResponses, "claude", "gpt-5.6-sol", nil, nil, body)
+	if err != nil {
+		t.Fatalf("ResponseFromEndpoint() error = %v", err)
+	}
+	if gjson.GetBytes(got, "usage.input_tokens").Int() != 5 || gjson.GetBytes(got, "usage.cache_read_input_tokens").Int() != 4 ||
+		gjson.GetBytes(got, "usage.output_tokens").Int() != 3 {
+		t.Fatalf("non-stream Claude usage = %s", gjson.GetBytes(got, "usage").Raw)
+	}
+
+	frames := []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_3\",\"model\":\"gpt-5.6-sol\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + string(body) + "}\n\n",
+	}
+	var state any
+	var delta string
+	for _, frame := range frames {
+		out, errStream := ResponsesSSEToClaude(context.Background(), "gpt-5.6-sol", nil, nil, []byte(frame), &state)
+		if errStream != nil {
+			t.Fatalf("ResponsesSSEToClaude() error = %v", errStream)
+		}
+		for _, chunk := range out {
+			for _, line := range sseDataLines(chunk) {
+				payload := strings.TrimSpace(strings.TrimPrefix(string(line), "data:"))
+				if gjson.Get(payload, "type").String() == "message_delta" {
+					delta = payload
+				}
+			}
+		}
+	}
+	if gjson.Get(delta, "usage.input_tokens").Int() != 5 || gjson.Get(delta, "usage.cache_read_input_tokens").Int() != 4 ||
+		gjson.Get(delta, "usage.output_tokens").Int() != 3 {
+		t.Fatalf("stream message_delta usage = %s", delta)
+	}
+}
+
+func TestClaudeJSONCitationsReachResponsesAnnotations(t *testing.T) {
+	t.Parallel()
+
+	claude := []byte(`{"id":"msg_2","type":"message","role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"The sky is blue.","citations":[{"type":"char_location","cited_text":"blue sky","document_index":0,"document_title":"Doc","start_char_index":0,"end_char_index":8}]}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":5}}`)
+	events, err := claudeMessageToSSE(claude)
+	if err != nil {
+		t.Fatalf("claudeMessageToSSE() error = %v", err)
+	}
+	if !strings.Contains(string(events), `"citations_delta"`) {
+		t.Fatalf("synthesised stream dropped the citation: %s", events)
+	}
+	original := []byte(`{"model":"claude-haiku-4.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	translated, err := RequestForEndpointFrom("openai-response", "claude-haiku-4.5", original, false, EndpointMessages)
+	if err != nil {
+		t.Fatalf("RequestForEndpointFrom() error = %v", err)
+	}
+	got, err := ResponseFromEndpoint(context.Background(), EndpointMessages, "openai-response", "claude-haiku-4.5", original, translated, claude)
+	if err != nil {
+		t.Fatalf("ResponseFromEndpoint() error = %v", err)
+	}
+	var cited string
+	gjson.GetBytes(got, "output").ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "message" {
+			cited = item.Get("content.0.annotations.0.cited_text").String()
+		}
+		return true
+	})
+	if cited != "blue sky" {
+		t.Fatalf("Responses answer lost the citation: %s", got)
+	}
+}

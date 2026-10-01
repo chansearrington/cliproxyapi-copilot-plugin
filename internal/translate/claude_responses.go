@@ -233,13 +233,7 @@ func responsesResponseToClaude(model string, body []byte) ([]byte, error) {
 		}
 	}
 	stopReason := responsesStopReason(root, hasToolUse)
-	usage := map[string]any{
-		"input_tokens":  numberValue(objectValue(root["usage"])["input_tokens"]),
-		"output_tokens": numberValue(objectValue(root["usage"])["output_tokens"]),
-	}
-	if cached := numberValue(objectValue(objectValue(root["usage"])["input_tokens_details"])["cached_tokens"]); cached != nil {
-		usage["cache_read_input_tokens"] = cached
-	}
+	usage := claudeUsageFromResponses(objectValue(root["usage"]))
 	out := map[string]any{
 		"id":            firstString(root, "id"),
 		"type":          "message",
@@ -480,6 +474,21 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// claudeUsageFromResponses maps Responses usage to Claude usage. Responses input_tokens include
+// cached tokens, while Claude input_tokens exclude cache reads, which it reports separately.
+func claudeUsageFromResponses(usage map[string]any) map[string]any {
+	input := int64Value(usage["input_tokens"])
+	cached := int64Value(objectValue(usage["input_tokens_details"])["cached_tokens"])
+	if cached > input {
+		cached = input
+	}
+	return map[string]any{
+		"input_tokens":            input - cached,
+		"cache_read_input_tokens": cached,
+		"output_tokens":           int64Value(usage["output_tokens"]),
+	}
 }
 
 func numberValue(value any) any {

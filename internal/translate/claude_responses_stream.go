@@ -194,7 +194,7 @@ func (s *responsesClaudeStreamState) start(response, payload map[string]any) [][
 		"stop_reason":   nil,
 		"stop_sequence": nil,
 		"usage": map[string]any{
-			"input_tokens":  numberValue(usage["input_tokens"]),
+			"input_tokens":  claudeUsageFromResponses(usage)["input_tokens"],
 			"output_tokens": 0,
 		},
 	}
@@ -306,7 +306,9 @@ func (s *responsesClaudeStreamState) finish(response map[string]any) [][]byte {
 			"stop_reason":   responsesStopReason(response, hasToolUse),
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{"output_tokens": numberValue(usage["output_tokens"])},
+		// The final usage repeats the input counts: message_start went out before Copilot
+		// reported any, and chat and Claude clients read their totals from this event.
+		"usage": claudeUsageFromResponses(usage),
 	}))
 	out = append(out, claudeSSE("message_stop", map[string]any{"type": "message_stop"}))
 	s.Stopped = true
